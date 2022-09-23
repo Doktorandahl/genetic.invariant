@@ -10,4 +10,12 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 Imports: 
-    dplyr
+    doParallel,
+    dplyr,
+    FNN,
+    foreach,
+    MLmetrics,
+    parallel
+RoxygenNote: 7.2.1
+Depends: 
+    R (>= 2.10)

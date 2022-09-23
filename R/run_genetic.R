@@ -1,80 +1,171 @@
 
-run_genetic <- function(n_individuals=100,n_discard=10,n_keep=10,
-                        n_gens=10,k,ivs,dv,data,init_standardize = T,evaluate_best_on=NULL,use_oob_evaluation=T,metric = 'mse',timing = T,plotres = T){
-  if(init_standardize){
-    data <- as.matrix(data)
-    data[,ivs] <- data[,ivs] %>% apply(2,standardize_vector)
-    if(!is.null(evaluate_best_on)){
-      test_data <- as.matrix(evaluate_best_on)
-      test_data[,ivs] <- test_data[,ivs] %>% apply(2, standardize_vector)
+
+
+#' Run genetic knn
+#'
+#' @param train
+#' @param test
+#' @param formula
+#' @param k
+#' @param gene_dist
+#' @param metric
+#' @param metric_type
+#' @param n_generations
+#' @param n_individuals
+#' @param n_discard
+#' @param n_keep
+#' @param standardize
+#' @param normalize
+#' @param normalize_scores
+#' @param timing
+#' @param plot_results
+#' @param ...
+#'
+#' @return
+#' @export
+#'
+#' @examples run_genetic_knn(x,y,z)
+#' @importFrom foreach %dopar%
+#' @importFrom foreach %do%
+
+run_genetic_knn <- function(train,
+                            test= NULL,
+                            formula,
+                            k,
+                            gene_dist,
+                            metric = 'MSE',
+                            metric_type = c('lower_is_better','higher_is_better'),
+                            n_generations = 10,
+                            n_individuals=100,
+                            n_discard=10,
+                            n_keep=10,
+                            standardize=T,
+                            normalize=F,
+                            normalize_scores = T,
+                            timing = T,
+                            plot_results = T,
+                            ...){
+  `%dopar%` <- foreach::`%dopar%`
+  `%do%` <- foreach::`%do%`
+ if(is.character(metric)){
+   eval <- getFromNamespace(metric,'MLmetrics')
+ }else if(is.function(metric)){
+   eval <- metric
+   metric <- as.character(metric)
+ }else{
+   stop('No valid metric provided')
+ }
+  metric_type <- match.arg(metric_type,c('lower_is_better','higher_is_better'))
+
+ mf_train <- model.frame(formula,train)
+ n_ivs <- ncol(mf_train) - 1
+ if(!is.null(test)){
+   mf_test <- model.frame(formula,test)
+ }
+
+  if(standardize){
+    mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,standardize_vector)
+    if(!is.null(test)){
+      mf_test[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,standardize_vector)
     }
   }
 
+ if(normalize){
+   mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,normalize_vector)
+   if(!is.null(test)){
+     mf_train[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,normalize_vector)
+   }
+ }
+
+ if(class(mf_train[,1])=='factor'){
+   if(length(levels(mf_train[,1]))>2){
+     stop('Currently only supports binary and continuous outcomes')
+   }else{
+     mf_train[,1] <- as.numeric(mf_train[,1])-1
+     if(!is.null(test)){
+       mf_test[,1] <- as.numeric(mf_test[,1])-1
+     }
+   }
+ }
 
 
+ ## Number of individuals allowed to mate
   n_mates <- n_individuals-n_discard
+ ## Number of children to generate
   n_children <- n_individuals-n_discard-n_keep
-  weights <- map(1:n_individuals,~gen_wts(length(ivs)))
+ ## Generate genes
+  genes <- purrr::map(1:n_individuals,~gen_wts(n_ivs,dist=gene_dist,...))
+
+
   results <- list()
-  if(plotres){
-    plotdata <- matrix(,n_gens,3)
-    colnames(plotdata) <- c('gen','oobmse','mse_test')
-  }
-  for(j in 1:n_gens){
-    tictoc::tic()
-    boot_id <- sample(1:nrow(data),replace=T)
-    data_train <- data[boot_id,]
-    data_test <- data[-boot_id,]
-    registerDoParallel(cores=detectCores()-1)
-    knns <- foreach(w = 1:length(weights)) %dopar%
-      knn.reg(t(t(as.matrix(data_train[,ivs])) * weights[[w]]),t(t(as.matrix(data_test[,ivs])) * weights[[w]]),y = as.matrix(data_train[,dv]),k)
-    scores <- knns %>% map(~mse_calc(as.matrix(data_test[,dv]),.x$pred)) %>% reduce(c)
-    # if(testtest){
-    # unwtd_knn <- knn.reg(as.matrix(data_train[,ivs]),as.matrix(data_test[,ivs]),as.matrix(data_train[,dv]),k)
-    #   unwtd_mse <- mse_calc(as.matrix(data_test[,dv]),unwtd_knn$pred)
-    #unwtd_knn_true <- knn.reg(as.matrix(data[,ivs]),as.matrix(test_data[,ivs]),as.matrix(data[,dv]),k)
-    #unwtd_mse_true <- mse_calc(as.matrix(test_data[,dv]),unwtd_knn_true$pred)
-    # }
-    ranked_scores <- sort(scores)
 
+  for(j in 1:n_generations){
+    boot_id <- sample(1:nrow(mf_train),replace=T)
+    data_train <- mf_train[boot_id,]
+    data_oob <- mf_train[-boot_id,]
 
-    weights <- weights[order(scores)]
-    safe <- weights[1:n_keep]
-    mate_pop <- weights[1:n_mates]
-    pairs <- foreach(i = sample(1:n_mates,
-                                size=n_children,
-                                replace = T,
-                                prob = 1/ranked_scores[1:n_mates])) %do%
-      c(i,sample(setdiff(1:n_mates,i),
-                 size=1,
-                 replace = T,
-                 prob = 1/ranked_scores[setdiff(1:n_mates,i)]))
+    knns <- foreach::foreach(w = 1:length(genes)) %dopar%
+      FNN::knn.reg(train = scale(data_train[,-1],center=FALSE,scale=1/genes[[w]]),
+               test = scale(data_oob[,-1],center=FALSE,scale=1/genes[[w]]),
+               y = data_train[,1],
+               k=k)
 
-    new_inds <- map(1:n_discard,~gen_wts(length(ivs)))
-    children <- pairs %>% map(~mate(.x,weights,scores))
-    weights <- c(safe,children,new_inds)
-    if(!is.null(evaluate_best_on)){
-      knn_test <- knn.reg(t(t(as.matrix(data[,ivs])) * weights[[1]]),t(t(as.matrix(test_data[,ivs])) * weights[[1]]),as.matrix(data[,dv]),k)
-      mse_test <- mse_calc(test_data[,dv],knn_test$pred)
-      cat('Lowest MSE: ',min(scores),' MSE on test: ',mse_test,' Gen nr: ',j,"\n")
+    scores <- knns %>% purrr::map(~eval(.x$pred,data_oob[,1])) %>% reduce(c)
+
+    if(normalize_scores){
+    scores_norm <- normalize_vector(scores)
+    if(metric_type == 'lower_is_better'){
+      scores_fitness <- (scores_norm - 1)*(-1)
+      eval2 <- min
     }else{
-      cat('Lowest MSE: ',min(scores),' Gen nr: ',j,"\n")
+      eval2 <- max
     }
-    res <- list(mse_test = mse_test, weights = weights, mse_all = scores)
+    ranked_scores <- sort(scores_fitness,decreasing = T)
+    }else{
+      if(metric_type == 'lower_is_better'){
+        ranked_scores <- sort(scores)
+        scores_fitness <- (scores-max(scores))*(-1)
+        eval2 <- min
+      }else{
+        ranked_scores <- sort(scores,decreasing=T)
+        eval2 <- max
+      }
+    }
+
+
+
+
+    ## Reorder individuals by their score/fitness
+    genes <- genes[order(scores)]
+    ## Save n_keep individuals to next generation
+    safe <- genes[1:n_keep]
+    ## Select individuals for mating
+    mate_pop <- genes[1:n_mates]
+    ## Make random draws of parents for new children based on their ranked score probability
+    pairs <- foreach::foreach(i = 1:n_children) %do%
+      sample(1:n_mates,size=2,replace = F,prob = ranked_scores[1:n_mates])
+
+    new_inds <- purrr::map(1:n_discard,~gen_wts(n_ivs,dist=gene_dist,...))
+
+    children <- purrr::map(pairs, ~mate(genes[[.x[1]]],genes[[.x[2]]],ranked_scores[.x[1]],ranked_scores[.x[2]],mutated_genes =  gen_wts(n_ivs,dist=gene_dist,...)))
+
+    genes <- c(safe,children,new_inds)
+
+    if(!is.null(test)){
+      knn_test <- FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[1]]),
+                          test = scale(mf_test[,-1],center=FALSE,scale=1/genes[[1]]),
+                          y = mf_train[,1],
+                          k=k)
+      score_test <- eval(knn_test$pred,mf_test[,1])
+      cat('Best ',metric,' in train: ',eval2(scores),'.',' Best ',metric,' on test: ',score_test,'. Gen nr: ',j,"\n")
+    }else{
+      score_test <- NULL
+      cat('Best ',metric,' in train: ',eval2(scores),' Gen nr: ',j,"\n")
+    }
+
+    res <- list(score_test = score_test, weights = genes, raw_scores = scores, normalized_scores = scores_norm)
     results <- c(results,list(res))
-    if(plotres){
-      plotdata[j,1] <- j
-      plotdata[j, 2] <- min(scores)
-      plotdata[j, 3] <- mse_test
-      p1 <- plotdata %>% na.omit() %>% as_tibble() %>% pivot_longer(2:3) %>%
-        ggplot(aes(x=gen,y=value,color=name)) +
-        geom_line()+
-        geom_point()+
-        theme_minimal()+
-        ylim(c(0,1))
-      print(p1)
-    }
-    tictoc::toc()
+
 
   }
   return(results)
