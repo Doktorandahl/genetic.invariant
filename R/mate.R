@@ -10,7 +10,7 @@
 #'
 #' @return A vector of a child with genes from parent 1 and 2
 #'
-mate <- function(parent1,parent2,fitness1=NULL,fitness2=NULL,p_mutation = 0.05, mutated_genes=NULL){
+mate <- function(parent1,parent2,fitness1=NULL,fitness2=NULL,p_mutation_small = 0.05,p_mutation_large = 0.01, gene_dist=NULL){
   n_genes <- length(parent1)
 
   genes <- sample(1:2,size=n_genes,replace=T,prob=c(fitness1,fitness2))
@@ -18,12 +18,24 @@ mate <- function(parent1,parent2,fitness1=NULL,fitness2=NULL,p_mutation = 0.05, 
   child[genes==1] <- parent1[genes==1]
   child[genes==2] <- parent2[genes==2]
 
-  if(is.null(gen_wts)){
+
+
+  if(is.null(gene_dist)){
     return(child)
   }else{
-    mutate_gene <- runif(n_genes)<p_mutation
-    child[mutate_gene] <- mutated_genes[mutate_gene]
-    return(child)
+    if(is.numeric(gene_dist)){
+      diff_genwts <- diff(gene_dist)
+      small_mutation_shift <- min(diff_genwts[diff_genwts>0])*sample(c(-1,1),size=n_genes,replace=T)
+      large_mutation <- gen_wts(n_genes,gene_dist)
+    }else{
+      small_mutation_shift <- rnorm(n_genes,0,sd=sd(child)/4)
+    }
+    large_mutation_gene <- runif(n_genes)<p_mutation_large
+    child[large_mutation_gene] <- large_mutation[large_mutation_gene]
+    small_mutation_gene <- runif(n_genes)<p_mutation_small
+    child[small_mutation_gene] <- child[small_mutation_gene] + small_mutation_shift
+    child[child<0] <- 0
+        return(child)
   }
 }
 
