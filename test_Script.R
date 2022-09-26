@@ -18,7 +18,34 @@ cm2_test <- cm2 %>% filter(target_month_id>=445,target_month_id<=480) %>% na.omi
 
 f1 <- as.formula(paste("ln_ged_sb_target ~ ",paste(colnames(cm2)[1:23],collapse='+')))
 
+
+true_mse_cm_knn <- MLmetrics::MSE(knn.reg(as.data.frame(cm2_train[,1:23]) %>% map(~scale(.x)) %>% reduce(cbind),as.data.frame(cm2_test[,1:23]) %>% map(~scale(.x)) %>% reduce(cbind),y = cm2_train$ln_ged_sb_target,k = 7)$pred,cm2_test$ln_ged_sb_target)
+rr <- ranger::ranger(f1,data = cm2_train)
+
+true_mse_cm_rf <- MLmetrics::MSE(predict(rr,data=cm2_test)$prediction,cm2_test$ln_ged_sb_target)
+
 tictoc::tic()
-tt <- run_genetic_knn(f1,train = cm2_train,test=cm2_test,k = 7,gene_dist = seq(from=0, to=1, by=0.05),n_individuals = 100,n_keep = 10,n_discard = 10,n_generations = 10)
+tt <- run_genetic_knn(f1,train = cm2_train,
+                      test=cm2_test,
+                      k = 7,
+                      gene_dist = seq(from=0, to=1, by=0.05),
+                      eval_gens = 'oob',
+                      oob_repetitions = 10,
+                      n_individuals = 100,
+                      n_keep = 10,
+                      n_discard = 10,
+                      n_generations = 10)
 tictoc::toc()
 
+
+tictoc::tic()
+tt2 <- run_genetic_knn(f1,train = cm2_train,
+                       test=cm2_test,
+                       k = 7,
+                       gene_dist = seq(from=0, to=1, by=0.05),
+                       eval_gens = 'loocv',
+                       n_individuals = 100,
+                       n_keep = 10,
+                       n_discard = 10,
+                       n_generations = 10)
+tictoc::toc()

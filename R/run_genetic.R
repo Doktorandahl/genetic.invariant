@@ -3,22 +3,26 @@
 
 #' Run genetic knn
 #'
-#' @param train
-#' @param test
-#' @param formula
-#' @param k
-#' @param gene_dist
-#' @param metric
-#' @param metric_type
-#' @param n_generations
-#' @param n_individuals
-#' @param n_discard
-#' @param n_keep
-#' @param standardize
-#' @param normalize
-#' @param normalize_scores
-#' @param timing
-#' @param plot_results
+#' @param train Training data
+#' @param test Test data, optional
+#' @param formula Formula with prediction target on the left hand side and predictor features on the right
+#' @param k number of nearest neighbors to consider
+#' @param gene_dist Distribution for generating genes. Either a numeric vector of possible variable weights, or a character string referencing a probability distribution in R such as 'unif', 'chisq', or 'norm'. Also works with the half-normal distribution 'hnorm'
+#' @param metric Metric to evaluate generations on. Allowed values are any string referring to a evaluation function in the MLmetrics package, or any custom function in the form function(y_pred,y_true) to generate a single performance value
+#' @param metric_type Does a higher or lower score on the evaluation metric indicate better performance. E.g. A higher AUPR score indicates better performance while a lower MSE indicates better performance
+#' @param n_generations Number of generations to run the algorithm
+#' @param n_individuals Number of individuals per generation
+#' @param n_discard Number of worst performing individuals to discard in each generation
+#' @param n_keep Number of best performing individuals to keep in each generation
+#' @param eval_gens Should generations be evaluated on the leave-one-out cross-validation on the training data (loocv) or on bootstrapped out-of-bag data (oob). If 'oob' then training will be on bootstrapped data. 'loocv' is faster but prone to first-degree overfitting.
+#' @param oob_repetitions Number of bootstrap repetitions for each individual in each generation when calculating the evaluation metric. A higher number yields lower levels of overfitting, but extends training time by oob_repetitions
+#' @param standardize Should predictor features be standardized before knn is run? Defaults to TRUE
+#' @param normalize Should predictor features be normalized before knn is run? Defaults to FALSE
+#' @param normalize_scores Should evaluation scores be normalized when determining individual fitness? Defaults to TRUE
+#' @param p_mutation_small Probability of small mutation in genes when mating
+#' @param p_mutation_large Probability of large mutation in genes when mating
+#' @param evaluate_ensemble Should ensembling be done on the best performing individuals? Defaults to TRUE
+#' @param n_ensemble Number of best performing individuals to include in ensemble
 #' @param ...
 #'
 #' @return
@@ -32,36 +36,43 @@ run_genetic_knn <- function(train,
                             test= NULL,
                             formula,
                             k,
-                            gene_dist,
+                            gene_dist = 'unif',
                             metric = 'MSE',
                             metric_type = c('lower_is_better','higher_is_better'),
                             n_generations = 10,
                             n_individuals=100,
                             n_discard=10,
                             n_keep=10,
+                            eval_gens = c('loocv','oob','cv'),
+                            oob_repetitions = 10,
                             standardize=T,
                             normalize=F,
                             normalize_scores = T,
-                            timing = T,
-                            plot_results = T,
+                            p_mutation_small = 0.05,
+                            p_mutation_large = 0.01,
+                            evaluate_ensemble = T,
+                            n_ensemble=10,
                             ...){
   `%dopar%` <- foreach::`%dopar%`
   `%do%` <- foreach::`%do%`
- if(is.character(metric)){
-   eval <- getFromNamespace(metric,'MLmetrics')
- }else if(is.function(metric)){
-   eval <- metric
-   metric <- as.character(metric)
- }else{
-   stop('No valid metric provided')
- }
+  `%:%` <- foreach::`%:%`
+  dots_arg <- list(...)
+  if(is.character(metric)){
+    eval <- getFromNamespace(metric,'MLmetrics')
+  }else if(is.function(metric)){
+    eval <- metric
+    metric <- as.character(metric)
+  }else{
+    stop('No valid metric provided')
+  }
   metric_type <- match.arg(metric_type,c('lower_is_better','higher_is_better'))
+  eval_gens <- match.arg(eval_gens,c('loocv','oob','cv'))
 
- mf_train <- model.frame(formula,train)
- n_ivs <- ncol(mf_train) - 1
- if(!is.null(test)){
-   mf_test <- model.frame(formula,test)
- }
+  mf_train <- model.frame(formula,train)
+  n_ivs <- ncol(mf_train) - 1
+  if(!is.null(test)){
+    mf_test <- model.frame(formula,test)
+  }
 
   if(standardize){
     mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,standardize_vector)
@@ -70,57 +81,52 @@ run_genetic_knn <- function(train,
     }
   }
 
- if(normalize){
-   mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,normalize_vector)
-   if(!is.null(test)){
-     mf_train[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,normalize_vector)
-   }
- }
+  if(normalize){
+    mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,normalize_vector)
+    if(!is.null(test)){
+      mf_train[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,normalize_vector)
+    }
+  }
 
- if(class(mf_train[,1])=='factor'){
-   if(length(levels(mf_train[,1]))>2){
-     stop('Currently only supports binary and continuous outcomes')
-   }else{
-     mf_train[,1] <- as.numeric(mf_train[,1])-1
-     if(!is.null(test)){
-       mf_test[,1] <- as.numeric(mf_test[,1])-1
-     }
-   }
- }
+  if(class(mf_train[,1])=='factor'){
+    if(length(levels(mf_train[,1]))>2){
+      stop('Currently only supports binary and continuous outcomes')
+    }else{
+      mf_train[,1] <- as.numeric(mf_train[,1])-1
+      if(!is.null(test)){
+        mf_test[,1] <- as.numeric(mf_test[,1])-1
+      }
+    }
+  }
 
 
- ## Number of individuals allowed to mate
+  ## Number of individuals allowed to mate
   n_mates <- n_individuals-n_discard
- ## Number of children to generate
+  ## Number of children to generate
   n_children <- n_individuals-n_discard-n_keep
- ## Generate genes
-  genes <- purrr::map(1:n_individuals,~gen_wts(n_ivs,dist=gene_dist,...))
+  ## Generate genes
+  genes <- purrr::map(1:n_individuals,~gen_wts(n_ivs,dist=gene_dist,dots_arg))
 
 
   results <- list()
 
   for(j in 1:n_generations){
-    boot_id <- sample(1:nrow(mf_train),replace=T)
-    data_train <- mf_train[boot_id,]
-    data_oob <- mf_train[-boot_id,]
-
-    knns <- foreach::foreach(w = 1:length(genes)) %dopar%
-      FNN::knn.reg(train = scale(data_train[,-1],center=FALSE,scale=1/genes[[w]]),
-               test = scale(data_oob[,-1],center=FALSE,scale=1/genes[[w]]),
-               y = data_train[,1],
-               k=k)
-
-    scores <- knns %>% purrr::map(~eval(.x$pred,data_oob[,1])) %>% reduce(c)
-
-    if(normalize_scores){
-    scores_norm <- normalize_vector(scores)
-    if(metric_type == 'lower_is_better'){
-      scores_fitness <- (scores_norm - 1)*(-1)
-      eval2 <- min
-    }else{
-      eval2 <- max
+    if(eval_gens == 'oob'){
+      scores <- foreach::foreach(oob = 1:oob_repetitions) %do%
+        bootstrapping_routine_knn(mf_train,genes,eval,k) %>%
+        reduce(`+`)/oob_repetitions
+    }else if(eval_gens =='loocv'){
+      scores <- loocv_routine_knn(mf_train,genes,eval,k)
     }
-    ranked_scores <- sort(scores_fitness,decreasing = T)
+    if(normalize_scores){
+      scores_norm <- normalize_vector(scores)
+      if(metric_type == 'lower_is_better'){
+        scores_fitness <- (scores_norm - 1)*(-1)
+        eval2 <- min
+      }else{
+        eval2 <- max
+      }
+      ranked_scores <- sort(scores_fitness,decreasing = T)
     }else{
       if(metric_type == 'lower_is_better'){
         ranked_scores <- sort(scores)
@@ -145,19 +151,40 @@ run_genetic_knn <- function(train,
     pairs <- foreach::foreach(i = 1:n_children) %do%
       sample(1:n_mates,size=2,replace = F,prob = ranked_scores[1:n_mates])
 
-    new_inds <- purrr::map(1:n_discard,~gen_wts(n_ivs,dist=gene_dist,...))
+    new_inds <- purrr::map(1:n_discard,~gen_wts(n_ivs,dist=gene_dist,dots_arg))
 
-    children <- purrr::map(pairs, ~mate(genes[[.x[1]]],genes[[.x[2]]],ranked_scores[.x[1]],ranked_scores[.x[2]],mutated_genes =  gen_wts(n_ivs,dist=gene_dist,...)))
+    children <- purrr::map(pairs, ~mate(genes[[.x[1]]],genes[[.x[2]]],ranked_scores[.x[1]],ranked_scores[.x[2]],gene_dist =  gene_dist,p_mutation_small = p_mutation_small,p_mutation_large=p_mutation_large,dots_arg=dots_arg))
 
     genes <- c(safe,children,new_inds)
 
     if(!is.null(test)){
       knn_test <- FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[1]]),
-                          test = scale(mf_test[,-1],center=FALSE,scale=1/genes[[1]]),
-                          y = mf_train[,1],
-                          k=k)
+                               test = scale(mf_test[,-1],center=FALSE,scale=1/genes[[1]]),
+                               y = mf_train[,1],
+                               k=k)
       score_test <- eval(knn_test$pred,mf_test[,1])
-      cat('Best ',metric,' in train: ',eval2(scores),'.',' Best ',metric,' on test: ',score_test,'. Gen nr: ',j,"\n")
+      if(evaluate_ensemble){
+        knn_test_ensemble <- foreach(e = 1:n_ensemble) %do%
+          FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[e]]),
+                       test = scale(mf_test[,-1],center=FALSE,scale=1/genes[[e]]),
+                       y = mf_train[,1],
+                       k=k)
+        knn_train_ensemble <- foreach(e = 1:n_ensemble) %do%
+          FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[e]]),
+                       y = mf_train[,1],
+                       k=k)
+
+        knn_train_ensemble_pred <- purrr::map(knn_train_ensemble,~.x$pred) %>% reduce(`+`)/n_ensemble
+
+        knn_test_ensemble_pred <- purrr::map(knn_test_ensemble,~.x$pred) %>% reduce(`+`)/n_ensemble
+        score_ensemble_train <- eval(knn_train_ensemble_pred,mf_train[,1])
+
+        score_ensemble_test <- eval(knn_test_ensemble_pred,mf_test[,1])
+        cat('Ensemble (Best) ',metric,' in train: ',score_ensemble_train,' (',eval2(scores),').',' Ensemble (Best) ',metric,' on test: ',score_ensemble_test,' (',score_test,'). Gen nr: ',j,"\n",sep="")
+
+      }else{
+        cat('Best ',metric,' in train: ',eval2(scores),'.',' Best ',metric,' on test: ',score_test,'. Gen nr: ',j,"\n")
+      }
     }else{
       score_test <- NULL
       cat('Best ',metric,' in train: ',eval2(scores),' Gen nr: ',j,"\n")
@@ -171,5 +198,25 @@ run_genetic_knn <- function(train,
   return(results)
 }
 
+bootstrapping_routine_knn <- function(mf_train,genes,eval,k){
+  boot_id <- sample(1:nrow(mf_train),replace=T)
+  data_train <- mf_train[boot_id,]
+  data_oob <- mf_train[-boot_id,]
+
+  knns <- foreach::foreach(w = 1:length(genes)) %dopar%
+    FNN::knn.reg(train = scale(data_train[,-1],center=FALSE,scale=1/genes[[w]]),
+                 test = scale(data_oob[,-1],center=FALSE,scale=1/genes[[w]]),
+                 y = data_train[,1],
+                 k=k)
+  knns %>% purrr::map(~eval(.x$pred,data_oob[,1])) %>% reduce(c)
+}
 
 
+loocv_routine_knn <- function(mf_train,genes,eval,k){
+
+  knns <- foreach::foreach(w = 1:length(genes)) %dopar%
+    FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[w]]),
+                 y = mf_train[,1],
+                 k=k)
+  knns %>% purrr::map(~eval(.x$pred,mf_train[,1])) %>% reduce(c)
+}
