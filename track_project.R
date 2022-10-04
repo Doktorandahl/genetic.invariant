@@ -31,6 +31,12 @@ heart <- heart %>% set_names(c('age','ca','chol','cp','exang','fbs','num','oldsp
 
 heart <- heart %>% mutate(num = factor(num))
 
+adult <- adult %>% set_names(c('age','workclass','wage','education','education_num','marital_status','occupation','relationship','race','sex','capital_gain','capital_loss','hours_per_week','native_country','wage_class')) %>%
+  mutate(wage_class_num = case_when(wage_class == "<=50K" ~ 0,
+                                    T ~ 1))
+use_data(adult,overwrite = T)
+
+
 
 usethis::use_data(heart)
 usethis::use_data(cancer)

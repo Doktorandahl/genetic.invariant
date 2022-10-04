@@ -43,3 +43,54 @@ rescale_ivs <- function(x,w){
 
 }
 
+
+knn.reg_formula <- function(formula,train,test=NULL,k,
+                            algorithm = c("kd_tree","cover_tree", "brute"),
+                            standardize=TRUE,
+                            normalize = FALSE){
+  algorithm <- match.arg(algorithm,c("kd_tree","cover_tree", "brute"))
+  mf_train <- model.frame(formula,train)
+  mm_train <- model.matrix(formula,train)
+  n_ivs <- ncol(mm_train) - 1
+  if(!is.null(test)){
+    mf_test <- model.frame(formula,test)
+  mm_test <- model.matrix(formula,test)
+  }
+
+  if(standardize){
+    #mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,standardize_vector)
+    mm_train[,2:ncol(mm_train)] <- apply(mm_train[,2:ncol(mm_train)],2,standardize_vector)
+
+    if(!is.null(test)){
+     # mf_test[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,standardize_vector)
+      mm_test[,2:ncol(mm_test)] <- apply(mm_test[,2:ncol(mm_test)],2,standardize_vector)
+
+    }
+  }
+
+  if(normalize){
+    mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,normalize_vector)
+    mm_train[,2:ncol(mm_train)] <- apply(mm_train[,2:ncol(mm_train)],2,normalize_vector)
+
+    if(!is.null(test)){
+      mf_test[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,normalize_vector)
+      mm_test[,2:ncol(mm_test)] <- apply(mm_test[,2:ncol(mm_test)],2,normalize_vector)
+
+    }
+  }
+  if(is.null(test)){
+  return(FNN::knn.reg(train = mm_train[,-1],
+               y = mf_train[,1],
+               k=k,
+               algorithm = algorithm))
+  }else{
+    return(FNN::knn.reg(train = mm_train[,-1],
+                        test = mm_test[,-1],
+                        y = mf_train[,1],
+                        k=k,
+                        algorithm = algorithm))
+  }
+
+}
+
+

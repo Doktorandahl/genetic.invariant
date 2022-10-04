@@ -68,23 +68,28 @@ run_genetic_knn <- function(train,
   metric_type <- match.arg(metric_type,c('lower_is_better','higher_is_better'))
   eval_gens <- match.arg(eval_gens,c('loocv','oob','cv'))
 
+
   mf_train <- model.frame(formula,train)
-  n_ivs <- ncol(mf_train) - 1
+  mm_train <- model.matrix(formula,train)
+
+  n_ivs <- ncol(mm_train) - 1
   if(!is.null(test)){
     mf_test <- model.frame(formula,test)
+    mm_test <- model.matrix(formula,test)
+
   }
 
   if(standardize){
-    mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,standardize_vector)
+    mm_train[,2:ncol(mm_train)] <- apply(mm_train[,2:ncol(mm_train)],2,standardize_vector)
     if(!is.null(test)){
-      mf_test[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,standardize_vector)
+      mm_test[,2:ncol(mm_test)] <- apply(mm_test[,2:ncol(mm_test)],2,standardize_vector)
     }
   }
 
   if(normalize){
-    mf_train[,2:ncol(mf_train)] <- apply(mf_train[,2:ncol(mf_train)],2,normalize_vector)
+    mm_train[,2:ncol(mm_train)] <- apply(mm_train[,2:ncol(mm_train)],2,normalize_vector)
     if(!is.null(test)){
-      mf_train[,2:ncol(mf_test)] <- apply(mf_test[,2:ncol(mf_test)],2,normalize_vector)
+      mm_train[,2:ncol(mm_test)] <- apply(mm_test[,2:ncol(mm_test)],2,normalize_vector)
     }
   }
 
@@ -113,10 +118,10 @@ run_genetic_knn <- function(train,
   for(j in 1:n_generations){
     if(eval_gens == 'oob'){
       scores <- foreach::foreach(oob = 1:oob_repetitions) %do%
-        bootstrapping_routine_knn(mf_train,genes,eval,k) %>%
+        bootstrapping_routine_knn(mf_train,mm_train,genes,eval,k) %>%
         reduce(`+`)/oob_repetitions
     }else if(eval_gens =='loocv'){
-      scores <- loocv_routine_knn(mf_train,genes,eval,k)
+      scores <- loocv_routine_knn(mf_train,mm_train, genes,eval,k)
     }
     if(normalize_scores){
       scores_norm <- normalize_vector(scores)
@@ -142,7 +147,7 @@ run_genetic_knn <- function(train,
 
 
     ## Reorder individuals by their score/fitness
-    genes <- genes[order(scores)]
+    genes <- genes[order(scores_fitness,decreasing = T)]
     ## Save n_keep individuals to next generation
     safe <- genes[1:n_keep]
     ## Select individuals for mating
@@ -157,20 +162,36 @@ run_genetic_knn <- function(train,
 
     genes <- c(safe,children,new_inds)
 
+    ## Remove duplicates
+    n_duplicates <- sum(duplicated(genes))
+    ii <- 0
+    while(n_duplicates>0 & ii <= 1000){
+      pairs_dup <- foreach::foreach(i = 1:n_duplicates) %do%
+        sample(1:n_mates,size=2,replace = F,prob = ranked_scores[1:n_mates])
+      children_dup <- purrr::map(pairs_dup, ~mate(genes[[.x[1]]],genes[[.x[2]]],ranked_scores[.x[1]],ranked_scores[.x[2]],gene_dist =  gene_dist,p_mutation_small = p_mutation_small,p_mutation_large=p_mutation_large,dots_arg=dots_arg))
+      genes <- c(genes[!duplicated(genes)],children_dup)
+      if(ii==1000){
+        warning('Duplicates could not be fully removed, replacing duplicates with new inds')
+        new_inds_dup <- purrr::map(1:n_duplicates,~gen_wts(n_ivs,dist=gene_dist,dots_arg))
+        genes <- c(genes[!duplicated(genes)],new_inds_dup)
+      }
+      n_duplicates <- sum(duplicated(genes))
+    }
+
     if(!is.null(test)){
-      knn_test <- FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[1]]),
-                               test = scale(mf_test[,-1],center=FALSE,scale=1/genes[[1]]),
+      knn_test <- FNN::knn.reg(train = scale(mm_train[,-1],center=FALSE,scale=1/genes[[1]]),
+                               test = scale(mm_test[,-1],center=FALSE,scale=1/genes[[1]]),
                                y = mf_train[,1],
                                k=k)
       score_test <- eval(knn_test$pred,mf_test[,1])
       if(evaluate_ensemble){
         knn_test_ensemble <- foreach(e = 1:n_ensemble) %do%
-          FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[e]]),
-                       test = scale(mf_test[,-1],center=FALSE,scale=1/genes[[e]]),
+          FNN::knn.reg(train = scale(mm_train[,-1],center=FALSE,scale=1/genes[[e]]),
+                       test = scale(mm_test[,-1],center=FALSE,scale=1/genes[[e]]),
                        y = mf_train[,1],
                        k=k)
         knn_train_ensemble <- foreach(e = 1:n_ensemble) %do%
-          FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[e]]),
+          FNN::knn.reg(train = scale(mm_train[,-1],center=FALSE,scale=1/genes[[e]]),
                        y = mf_train[,1],
                        k=k)
 
@@ -183,14 +204,23 @@ run_genetic_knn <- function(train,
         cat('Ensemble (Best) ',metric,' in train: ',score_ensemble_train,' (',eval2(scores),').',' Ensemble (Best) ',metric,' on test: ',score_ensemble_test,' (',score_test,'). Gen nr: ',j,"\n",sep="")
 
       }else{
+        score_ensemble_test <- NULL
+        score_ensemble_train <- NULL
         cat('Best ',metric,' in train: ',eval2(scores),'.',' Best ',metric,' on test: ',score_test,'. Gen nr: ',j,"\n")
       }
     }else{
       score_test <- NULL
+      score_ensemble_test <- NULL
+      score_ensemble_train <- NULL
       cat('Best ',metric,' in train: ',eval2(scores),' Gen nr: ',j,"\n")
     }
 
-    res <- list(score_test = score_test, weights = genes, raw_scores = scores, normalized_scores = scores_norm)
+    res <- list(score_test = score_test,
+                score_ensemble_test = score_ensemble_test,
+                score_ensemble_train = score_ensemble_train,
+                weights = genes,
+                raw_scores = scores,
+                normalized_scores = scores_norm)
     results <- c(results,list(res))
 
 
@@ -198,24 +228,26 @@ run_genetic_knn <- function(train,
   return(results)
 }
 
-bootstrapping_routine_knn <- function(mf_train,genes,eval,k){
-  boot_id <- sample(1:nrow(mf_train),replace=T)
-  data_train <- mf_train[boot_id,]
-  data_oob <- mf_train[-boot_id,]
+bootstrapping_routine_knn <- function(mf_train,mm_train,genes,eval,k){
+  boot_id <- sample(1:nrow(mm_train),replace=T)
+  mf_train_boot <- mf_train[boot_id,]
+  mf_oob_boot <- mf_train[-boot_id,]
+  data_train <- mm_train[boot_id,]
+  data_oob <- mm_train[-boot_id,]
 
   knns <- foreach::foreach(w = 1:length(genes)) %dopar%
     FNN::knn.reg(train = scale(data_train[,-1],center=FALSE,scale=1/genes[[w]]),
                  test = scale(data_oob[,-1],center=FALSE,scale=1/genes[[w]]),
-                 y = data_train[,1],
+                 y = mf_train_boot[,1],
                  k=k)
-  knns %>% purrr::map(~eval(.x$pred,data_oob[,1])) %>% reduce(c)
+  knns %>% purrr::map(~eval(.x$pred,mf_oob_boot[,1])) %>% reduce(c)
 }
 
 
-loocv_routine_knn <- function(mf_train,genes,eval,k){
+loocv_routine_knn <- function(mf_train,mm_train,genes,eval,k){
 
   knns <- foreach::foreach(w = 1:length(genes)) %dopar%
-    FNN::knn.reg(train = scale(mf_train[,-1],center=FALSE,scale=1/genes[[w]]),
+    FNN::knn.reg(train = scale(mm_train[,-1],center=FALSE,scale=1/genes[[w]]),
                  y = mf_train[,1],
                  k=k)
   knns %>% purrr::map(~eval(.x$pred,mf_train[,1])) %>% reduce(c)
